@@ -1054,11 +1054,11 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
         // so dE/dR_A picks up dE/dr_i for every point i centered on atom A:
         //   1) the explicit |r_i - r_j| dependence of the VV10 kernel (GRID_W*)
         //   2) the change in rho/gamma as the point moves through the density
+        //   3) the response of the nuclear-partition quadrature weights
         // Together with the basis-function term above, these make the gradient
-        // exactly translationally invariant. Grid weight derivatives remain
-        // neglected, consistent with the rest of Psi4. All contributions are
-        // accumulated in the same half-gradient convention as
-        // rks_gradient_integrator (the caller applies the factor of 2).
+        // exactly translationally invariant. All contributions use the same
+        // half-gradient convention as rks_gradient_integrator (the caller
+        // applies the factor of 2).
         const size_t Aparent = block->parent_atom();
         double** Gp = G_local[rank]->pointer();
         const double* w = block->w();

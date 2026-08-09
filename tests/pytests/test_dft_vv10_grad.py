@@ -37,8 +37,6 @@ _NH2 = """
     pytest.param("BLYP-NL", "rks", _HCN, (20, 74), 5, id="BLYP-NL RKS coarse NL grid"),
 ])
 def test_vv10_gradient(func, ref_key, geom, nl_grid, digits):
-    """Compare analytic vs finite-difference gradients for VV10 functionals."""
-
     psi4.set_num_threads(1)
 
     mol = psi4.geometry(geom)

@@ -155,10 +155,8 @@ class MolecularGrid {
     void print_details(std::string out_fname = "outfile", int print = 2) const;
 
     /// Accumulate G[B] += scale * sum_P f[P] * dw_P/dR_B for one block, where
-    /// dw_P/dR_B is the total quadrature-weight derivative (nuclear partition
-    /// response, with the point riding its parent atom). Requires ATOMIC
-    /// blocking so the block knows its parent atom. Thread-safe for
-    /// per-thread G.
+    /// dw_P/dR_B is the nuclear-partition quadrature-weight derivative (point
+    /// riding its parent atom). Requires ATOMIC blocking.
     void block_weight_gradient(std::shared_ptr<BlockOPoints> block, const double* f, double scale,
                                std::shared_ptr<Matrix> G) const;
 
