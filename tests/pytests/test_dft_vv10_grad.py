@@ -7,29 +7,41 @@ from utils import compare_values
 
 pytestmark = [pytest.mark.psi, pytest.mark.api, pytest.mark.scf, pytest.mark.dft]
 
+_HCN = """
+    0 1
+    N   -0.0034118    3.5353926    0.0000000
+    C    0.0751963    2.3707040    0.0000000
+    H    0.1476295    1.3052847    0.0000000
+"""
+
+_NH2 = """
+    0 2
+    N
+    H 1 1.03
+    H 1 1.03 2 103.0
+"""
+
 
 @pytest.mark.findif
 @pytest.mark.slow
-@pytest.mark.parametrize("func,ref_key,nl_grid,digits", [
-    pytest.param("BLYP-NL", "rks", (50, 194), 4, id="BLYP-NL RKS"),
-    pytest.param("BLYP-NL", "uks", (50, 194), 4, id="BLYP-NL UKS"),
+@pytest.mark.parametrize("func,ref_key,geom,nl_grid,digits", [
+    pytest.param("BLYP-NL", "rks", _HCN, (50, 194), 4, id="BLYP-NL RKS"),
+    pytest.param("BLYP-NL", "uks", _NH2, (50, 194), 4, id="BLYP-NL UKS doublet"),
+    # Meta-GGA host functional: exercises the V_TAU_A handling in the VV10
+    # gradient path on top of the GGA-level VV10 terms.
+    pytest.param("wB97M-V", "rks", _HCN, (50, 194), 4, id="wB97M-V RKS"),
     # Coarse NL grid at tight tolerance: only passes if the grid-motion
     # terms (point-position, density, and weight response) are included in
     # the analytic gradient; the density-response-only gradient is off by
     # ~1e-4 here.
-    pytest.param("BLYP-NL", "rks", (20, 74), 5, id="BLYP-NL RKS coarse NL grid"),
+    pytest.param("BLYP-NL", "rks", _HCN, (20, 74), 5, id="BLYP-NL RKS coarse NL grid"),
 ])
-def test_vv10_gradient(func, ref_key, nl_grid, digits):
+def test_vv10_gradient(func, ref_key, geom, nl_grid, digits):
     """Compare analytic vs finite-difference gradients for VV10 functionals."""
 
     psi4.set_num_threads(1)
 
-    mol = psi4.geometry("""
-        0 1
-        N   -0.0034118    3.5353926    0.0000000
-        C    0.0751963    2.3707040    0.0000000
-        H    0.1476295    1.3052847    0.0000000
-    """)
+    mol = psi4.geometry(geom)
 
     psi4.set_options({
         "basis": "cc-pvdz",

@@ -1,0 +1,65 @@
+#! Analytic VV10/NLC gradients vs stored references: BLYP-NL RKS (HCN),
+#! BLYP-NL UKS (SSH doublet), and wB97M-V RKS (water, meta-GGA host).
+
+blyp_nl_rks_grad = psi4.Matrix.from_list([  #TEST
+ [ 3.614659540700e-04,-5.142170591273e-03, 0.000000000000e+00], #TEST
+ [ 4.602644890199e-04,-7.176577332163e-03, 0.000000000000e+00], #TEST
+ [-8.214001612093e-04, 1.231379820845e-02, 0.000000000000e+00], #TEST
+    ])
+
+blyp_nl_uks_grad = psi4.Matrix.from_list([  #TEST
+ [ 1.050700207748e-02,-1.192206033708e-02, 0.000000000000e+00], #TEST
+ [ 1.025524588377e-02,-2.916405431844e-03, 0.000000000000e+00], #TEST
+ [-2.076216576622e-02, 1.483682582380e-02, 0.000000000000e+00], #TEST
+    ])
+
+wb97mv_rks_grad = psi4.Matrix.from_list([  #TEST
+ [ 0.000000000000e+00, 0.000000000000e+00,-1.766858650491e-02], #TEST
+ [ 0.000000000000e+00,-3.426254875642e-02, 8.831848002140e-03], #TEST
+ [ 0.000000000000e+00, 3.426254875642e-02, 8.831848002140e-03], #TEST
+    ])
+
+molecule hcn {
+0 1
+N   -0.0034118    3.5353926    0.0000000
+C    0.0751963    2.3707040    0.0000000
+H    0.1476295    1.3052847    0.0000000
+}
+
+set {
+    scf_type                  df
+    basis                     cc-pvdz
+    dft_radial_points         99
+    dft_spherical_points      302
+    dft_vv10_radial_points    50
+    dft_vv10_spherical_points 194
+    e_convergence             8
+    d_convergence             8
+}
+
+grad = gradient('BLYP-NL', dertype=1)
+compare_matrices(blyp_nl_rks_grad, grad, 6, "BLYP-NL RKS Analytic vs Store")    #TEST
+
+molecule ssh {
+0 2
+S
+H 1 1.4
+S 1 2.1 2 110.0
+}
+
+set reference uks
+
+grad = gradient('BLYP-NL', dertype=1)
+compare_matrices(blyp_nl_uks_grad, grad, 6, "BLYP-NL UKS Analytic vs Store")    #TEST
+
+molecule h2o {
+0 1
+O
+H 1 1.0
+H 1 1.0 2 110.0
+}
+
+set reference rks
+
+grad = gradient('wB97M-V', dertype=1)
+compare_matrices(wb97mv_rks_grad, grad, 6, "wB97M-V RKS Analytic vs Store")    #TEST
