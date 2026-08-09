@@ -984,7 +984,10 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
     // => VV10 Grid and Cache <=
     std::map<std::string, std::string> opt_map;
     opt_map["DFT_PRUNING_SCHEME"] = "FLAT";
-    // Use default OCTREE blocking (same as energy)
+    // ATOMIC blocking keeps every block's points on a single parent atom, which
+    // the grid-motion terms below require. The quadrature points and weights are
+    // identical to the energy path; only the grouping into blocks differs.
+    opt_map["DFT_BLOCK_SCHEME"] = "ATOMIC";
 
     std::map<std::string, int> opt_int_map;
     opt_int_map["DFT_RADIAL_POINTS"] = options_.get_int("DFT_VV10_RADIAL_POINTS");
@@ -1007,10 +1010,11 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
     std::vector<double> vv10_exc(num_threads_);
 
     // Per thread temporaries
-    std::vector<SharedMatrix> G_local, U_local;
+    std::vector<SharedMatrix> G_local, U_local, GG_local;
     for (size_t i = 0; i < num_threads_; i++) {
         G_local.push_back(std::make_shared<Matrix>("G Temp", natom, 3));
         U_local.push_back(std::make_shared<Matrix>("U Temp", max_points, max_functions));
+        GG_local.push_back(std::make_shared<Matrix>("Grad gamma Temp", 3, max_points));
     }
 
 // => Compute the kernel <=
@@ -1045,17 +1049,91 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
         }
         dft_integrators::rks_gradient_integrator(primary_, block, fworker, pworker, G_local[rank], U_local[rank]);
 
-        // Note: GRID_WX/WY/WZ from the VV10 kernel are NOT used here. In the
-        // continuum limit, the VV10 integral is over dummy spatial variables r,r'
-        // that do not depend on nuclear coordinates, so the kernel's explicit spatial
-        // derivatives do not contribute to dE/dR. On a discrete atom-centered grid,
-        // moving nuclei shifts grid points and weights, introducing discretization
-        // artifacts (grid-position and grid-weight derivatives). Psi4 neglects grid
-        // weight derivatives for all functionals; the grid-position derivatives must
-        // also be neglected to preserve the cancellation between these terms and
-        // maintain translational invariance. The density-response contribution
-        // through V_RHO_A and V_GAMMA_AA (handled by rks_gradient_integrator above)
-        // is the complete analytic gradient.
+        // => Grid-motion contributions <= //
+        // Each quadrature point rides its parent nucleus (hence ATOMIC blocking),
+        // so dE/dR_A picks up dE/dr_i for every point i centered on atom A:
+        //   1) the explicit |r_i - r_j| dependence of the VV10 kernel (GRID_W*)
+        //   2) the change in rho/gamma as the point moves through the density
+        // Together with the basis-function term above, these make the gradient
+        // exactly translationally invariant. Grid weight derivatives remain
+        // neglected, consistent with the rest of Psi4. All contributions are
+        // accumulated in the same half-gradient convention as
+        // rks_gradient_integrator (the caller applies the factor of 2).
+        const size_t Aparent = block->parent_atom();
+        double** Gp = G_local[rank]->pointer();
+        const double* w = block->w();
+
+        // => Term 1: explicit kernel dependence on the grid point positions <= //
+        const double* grid_wx = fworker->vv_value("GRID_WX")->pointer();
+        const double* grid_wy = fworker->vv_value("GRID_WY")->pointer();
+        const double* grid_wz = fworker->vv_value("GRID_WZ")->pointer();
+        for (int P = 0; P < npoints; P++) {
+            Gp[Aparent][0] += 0.5 * grid_wx[P];
+            Gp[Aparent][1] += 0.5 * grid_wy[P];
+            Gp[Aparent][2] += 0.5 * grid_wz[P];
+        }
+
+        // => Term 2: density variation at the moving point <= //
+        //   0.5 * w_P * (v_rho grad(rho) + v_gamma grad(gamma))
+        // grad(gamma)_a = 2 sum_b rho_ab rho_b requires the density Hessian
+        //   rho_ab = 4 * (phi_ab D phi + phi_a D phi_b)
+        const std::vector<int>& function_map = block->functions_local_to_global();
+        const int nlocal = function_map.size();
+
+        double** phi = pworker->basis_value("PHI")->pointer();
+        double** phi_d1[3] = {pworker->basis_value("PHI_X")->pointer(), pworker->basis_value("PHI_Y")->pointer(),
+                              pworker->basis_value("PHI_Z")->pointer()};
+        double** phi_xx = pworker->basis_value("PHI_XX")->pointer();
+        double** phi_xy = pworker->basis_value("PHI_XY")->pointer();
+        double** phi_xz = pworker->basis_value("PHI_XZ")->pointer();
+        double** phi_yy = pworker->basis_value("PHI_YY")->pointer();
+        double** phi_yz = pworker->basis_value("PHI_YZ")->pointer();
+        double** phi_zz = pworker->basis_value("PHI_ZZ")->pointer();
+        double** phi_d2[3][3] = {{phi_xx, phi_xy, phi_xz}, {phi_xy, phi_yy, phi_yz}, {phi_xz, phi_yz, phi_zz}};
+        const int coll_funcs = pworker->basis_value("PHI")->ncol();
+
+        const double* rho_d1[3] = {pworker->point_value("RHO_AX")->pointer(),
+                                   pworker->point_value("RHO_AY")->pointer(),
+                                   pworker->point_value("RHO_AZ")->pointer()};
+        const double* v_rho = fworker->value("V_RHO_A")->pointer();
+        const double* v_gamma = fworker->value("V_GAMMA_AA")->pointer();
+
+        double** Dp = pworker->D_scratch()[0]->pointer();
+        double** Tp = pworker->scratch()[0]->pointer();
+        double** Up = U_local[rank]->pointer();
+        double** GGp = GG_local[rank]->pointer();
+        GG_local[rank]->zero();
+
+        // U := phi D
+        C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi[0], coll_funcs, Dp[0], max_functions, 0.0, Up[0],
+                max_functions);
+
+        for (int b = 0; b < 3; b++) {
+            // T := phi_b D
+            C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi_d1[b][0], coll_funcs, Dp[0], max_functions, 0.0,
+                    Tp[0], max_functions);
+            for (int P = 0; P < npoints; P++) {
+                for (int a = 0; a < 3; a++) {
+                    const double rho_ab = 4.0 * (C_DDOT(nlocal, phi_d2[a][b][P], 1, Up[P], 1) +
+                                                 C_DDOT(nlocal, phi_d1[a][P], 1, Tp[P], 1));
+                    GGp[a][P] += 2.0 * rho_ab * rho_d1[b][P];
+                }
+            }
+        }
+
+        for (int P = 0; P < npoints; P++) {
+            Gp[Aparent][0] += 0.5 * w[P] * (v_rho[P] * rho_d1[0][P] + v_gamma[P] * GGp[0][P]);
+            Gp[Aparent][1] += 0.5 * w[P] * (v_rho[P] * rho_d1[1][P] + v_gamma[P] * GGp[1][P]);
+            Gp[Aparent][2] += 0.5 * w[P] * (v_rho[P] * rho_d1[2][P] + v_gamma[P] * GGp[2][P]);
+        }
+
+        // => Term 3: quadrature-weight derivatives <= //
+        // The nuclear partition weights depend on all nuclear positions.
+        // Individually, terms 1+2 and this term are O(1) even in the
+        // fine-grid limit; only their sum is a small quadrature artifact,
+        // so the position terms above must not be added without this one.
+        const double* eps_grid = fworker->vv_value("GRID_EPS")->pointer();
+        nlgrid.block_weight_gradient(block, eps_grid, 0.5, G_local[rank]);
 
         parallel_timer_off("V_xc gradient", rank);
     }

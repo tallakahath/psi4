@@ -49,6 +49,7 @@ class BlockOPoints;
 class RadialGrid;
 class SphericalGrid;
 class Options;
+class NuclearWeightMgr;
 
 // This is an auxiliary structure used internally by the grid-builder class.
 // Apparently, for performance reasons, it is not good for the final molecular grid
@@ -107,6 +108,8 @@ class MolecularGrid {
     std::shared_ptr<BasisExtents> extents_;
     /// BasisSet from extents_
     std::shared_ptr<BasisSet> primary_;
+    /// Nuclear partition weight machinery, kept alive for weight gradients
+    std::shared_ptr<NuclearWeightMgr> nuclear_weight_mgr_;
 
     /// Sieve and block
     void postProcess(std::shared_ptr<BasisExtents> extents, int max_points, int min_points, double max_radius);
@@ -150,6 +153,14 @@ class MolecularGrid {
     /// Print information about the grid
     void print(std::string out_fname = "outfile", int print = 2) const;
     void print_details(std::string out_fname = "outfile", int print = 2) const;
+
+    /// Accumulate G[B] += scale * sum_P f[P] * dw_P/dR_B for one block, where
+    /// dw_P/dR_B is the total quadrature-weight derivative (nuclear partition
+    /// response, with the point riding its parent atom). Requires ATOMIC
+    /// blocking so the block knows its parent atom. Thread-safe for
+    /// per-thread G.
+    void block_weight_gradient(std::shared_ptr<BlockOPoints> block, const double* f, double scale,
+                               std::shared_ptr<Matrix> G) const;
 
     /// Orientation matrix
     std::shared_ptr<Matrix> orientation() const { return orientation_; }
