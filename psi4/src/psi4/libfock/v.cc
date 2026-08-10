@@ -2039,11 +2039,38 @@ SharedMatrix RV::compute_gradient() {
         point_workers_[i]->set_deriv((functional_->is_gga() || functional_->is_meta() ? 2 : 1));
     }
 
+    // => Optional grid response <= //
+    // The grid-motion terms need each block on a single parent atom, so run
+    // the gradient loop over an ATOMIC-blocked copy of the grid (identical
+    // quadrature points and weights; only the grouping differs) with point
+    // workers sized for it.
+    const bool grid_response = options_.get_bool("DFT_GRID_RESPONSE");
+    std::shared_ptr<DFTGrid> ggrid;
+    std::vector<std::shared_ptr<PointFunctions>> grid_point_workers;
+    if (grid_response) {
+        std::map<std::string, std::string> opt_map;
+        opt_map["DFT_BLOCK_SCHEME"] = "ATOMIC";
+        std::map<std::string, int> opt_int_map;
+        ggrid = std::make_shared<DFTGrid>(primary_->molecule(), primary_, opt_int_map, opt_map, options_);
+        max_functions = ggrid->max_functions();
+        max_points = ggrid->max_points();
+        for (size_t i = 0; i < num_threads_; i++) {
+            auto point_tmp = std::make_shared<RKSFunctions>(primary_, max_points, max_functions);
+            // The convection term needs grad(rho) even for LDA functionals
+            point_tmp->set_ansatz(std::max(ansatz, 1));
+            point_tmp->set_deriv((functional_->is_gga() || functional_->is_meta() ? 2 : 1));
+            point_tmp->set_pointers(D_AO_[0]);
+            grid_point_workers.push_back(point_tmp);
+        }
+    }
+    const auto& gblocks = (grid_response ? ggrid->blocks() : grid_->blocks());
+
     // Per thread temporaries
-    std::vector<SharedMatrix> G_local, U_local;
+    std::vector<SharedMatrix> G_local, U_local, GG_local;
     for (size_t i = 0; i < num_threads_; i++) {
         G_local.push_back(std::make_shared<Matrix>("G Temp", natom, 3));
         U_local.push_back(std::make_shared<Matrix>("U Temp", max_points, max_functions));
+        GG_local.push_back(std::make_shared<Matrix>("Grad temp", 3, max_points));
     }
 
     std::vector<double> functionalq(num_threads_);
@@ -2054,16 +2081,16 @@ SharedMatrix RV::compute_gradient() {
 
     // => Master gradient loop <= //
 #pragma omp parallel for private(rank) schedule(dynamic) num_threads(num_threads_)
-    for (size_t Q = 0; Q < grid_->blocks().size(); Q++) {
+    for (size_t Q = 0; Q < gblocks.size(); Q++) {
         // ==> Per-thread setup <==
 #ifdef _OPENMP
         rank = omp_get_thread_num();
 #endif
         auto fworker = functional_workers_[rank];
-        auto pworker = point_workers_[rank];
+        auto pworker = (grid_response ? grid_point_workers[rank] : point_workers_[rank]);
 
         // ==> Per-block setup <==
-        auto block = grid_->blocks()[Q];
+        auto block = gblocks[Q];
 
         // ==> Compute rho, gamma, etc. for block <== //
         parallel_timer_on("Properties", rank);
@@ -2087,6 +2114,89 @@ SharedMatrix RV::compute_gradient() {
 
         // => Integrate all contributions into G <= //
         dft_integrators::rks_gradient_integrator(primary_, block, fworker, pworker, G_local[rank], U_local[rank]);
+
+        if (grid_response) {
+            // => Grid-motion contributions <= //
+            // Each quadrature point rides its parent nucleus, so dE/dR_A picks
+            // up the change of the local densities at the moving point and the
+            // response of the nuclear-partition quadrature weights. Same
+            // half-gradient convention as rks_gradient_integrator.
+            const size_t Aparent = block->parent_atom();
+            const int npoints = block->npoints();
+            double** Gp = G_local[rank]->pointer();
+            const double* w = block->w();
+            const auto& function_map = block->functions_local_to_global();
+            const int nlocal = function_map.size();
+
+            double** phi = pworker->basis_value("PHI")->pointer();
+            const double* rho_d1[3] = {pworker->point_value("RHO_AX")->pointer(),
+                                       pworker->point_value("RHO_AY")->pointer(),
+                                       pworker->point_value("RHO_AZ")->pointer()};
+            const double* v_rho = fworker->value("V_RHO_A")->pointer();
+            const int coll_funcs = pworker->basis_value("PHI")->ncol();
+
+            double** Dp = pworker->D_scratch()[0]->pointer();
+            double** Tp = pworker->scratch()[0]->pointer();
+            double** Up = U_local[rank]->pointer();
+            double** GGp = GG_local[rank]->pointer();
+            GG_local[rank]->zero();
+
+            // grad(gamma)_a = 2 sum_b rho_ab rho_b with the density Hessian
+            //   rho_ab = 4 * (phi_ab D phi + phi_a D phi_b);
+            // grad(tau)_a = 2 sum_b phi_ab D phi_b (in the stored TAU_A
+            // convention). Both ride the same phi_b D intermediates.
+            if (fworker->is_gga() || fworker->is_meta()) {
+                double** phi_d1[3] = {pworker->basis_value("PHI_X")->pointer(),
+                                      pworker->basis_value("PHI_Y")->pointer(),
+                                      pworker->basis_value("PHI_Z")->pointer()};
+                double** phi_xx = pworker->basis_value("PHI_XX")->pointer();
+                double** phi_xy = pworker->basis_value("PHI_XY")->pointer();
+                double** phi_xz = pworker->basis_value("PHI_XZ")->pointer();
+                double** phi_yy = pworker->basis_value("PHI_YY")->pointer();
+                double** phi_yz = pworker->basis_value("PHI_YZ")->pointer();
+                double** phi_zz = pworker->basis_value("PHI_ZZ")->pointer();
+                double** phi_d2[3][3] = {
+                    {phi_xx, phi_xy, phi_xz}, {phi_xy, phi_yy, phi_yz}, {phi_xz, phi_yz, phi_zz}};
+
+                const double* v_gamma = (fworker->is_gga() ? fworker->value("V_GAMMA_AA")->pointer() : nullptr);
+                const double* v_tau = (fworker->is_meta() ? fworker->value("V_TAU_A")->pointer() : nullptr);
+
+                // U := phi D
+                C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi[0], coll_funcs, Dp[0], max_functions, 0.0,
+                        Up[0], max_functions);
+
+                for (int b = 0; b < 3; b++) {
+                    // T := phi_b D
+                    C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi_d1[b][0], coll_funcs, Dp[0],
+                            max_functions, 0.0, Tp[0], max_functions);
+                    for (int P = 0; P < npoints; P++) {
+                        for (int a = 0; a < 3; a++) {
+                            const double d2U = C_DDOT(nlocal, phi_d2[a][b][P], 1, Up[P], 1);
+                            const double d1T = C_DDOT(nlocal, phi_d1[a][P], 1, Tp[P], 1);
+                            if (v_gamma) {
+                                GGp[a][P] += 2.0 * v_gamma[P] * (4.0 * (d2U + d1T)) * rho_d1[b][P];
+                            }
+                            if (v_tau) {
+                                // V_TAU_A holds 0.5 dF/dtau (see LibXCfunctional);
+                                // grad(TAU)_a = 2 sum_b phi_ab D phi_b in the stored
+                                // convention, hence 2 * 2.
+                                const double d2T = C_DDOT(nlocal, phi_d2[a][b][P], 1, Tp[P], 1);
+                                GGp[a][P] += v_tau[P] * 4.0 * d2T;
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (int P = 0; P < npoints; P++) {
+                Gp[Aparent][0] += 0.5 * w[P] * (v_rho[P] * rho_d1[0][P] + GGp[0][P]);
+                Gp[Aparent][1] += 0.5 * w[P] * (v_rho[P] * rho_d1[1][P] + GGp[1][P]);
+                Gp[Aparent][2] += 0.5 * w[P] * (v_rho[P] * rho_d1[2][P] + GGp[2][P]);
+            }
+
+            // => Quadrature-weight derivatives <= //
+            ggrid->block_weight_gradient(block, fworker->value("V")->pointer(), 0.5, G_local[rank]);
+        }
 
         parallel_timer_off("V_xc gradient", rank);
     }
@@ -3799,12 +3909,37 @@ SharedMatrix UV::compute_gradient() {
         point_workers_[i]->set_deriv((functional_->is_gga() || functional_->is_meta() ? 2 : 1));
     }
 
+    // => Optional grid response <= //
+    // Same machinery as RV::compute_gradient: an ATOMIC-blocked copy of the
+    // grid (identical quadrature) so each block knows its parent atom.
+    const bool grid_response = options_.get_bool("DFT_GRID_RESPONSE");
+    std::shared_ptr<DFTGrid> ggrid;
+    std::vector<std::shared_ptr<PointFunctions>> grid_point_workers;
+    if (grid_response) {
+        std::map<std::string, std::string> opt_map;
+        opt_map["DFT_BLOCK_SCHEME"] = "ATOMIC";
+        std::map<std::string, int> opt_int_map;
+        ggrid = std::make_shared<DFTGrid>(primary_->molecule(), primary_, opt_int_map, opt_map, options_);
+        max_functions = ggrid->max_functions();
+        max_points = ggrid->max_points();
+        for (size_t i = 0; i < num_threads_; i++) {
+            auto point_tmp = std::make_shared<UKSFunctions>(primary_, max_points, max_functions);
+            // The convection term needs grad(rho) even for LDA functionals
+            point_tmp->set_ansatz(std::max(static_cast<int>(ansatz), 1));
+            point_tmp->set_deriv((functional_->is_gga() || functional_->is_meta() ? 2 : 1));
+            point_tmp->set_pointers(D_AO_[0], D_AO_[1]);
+            grid_point_workers.push_back(point_tmp);
+        }
+    }
+    const auto& gblocks = (grid_response ? ggrid->blocks() : grid_->blocks());
+
     // Thread scratch
     std::vector<std::shared_ptr<Vector>> Q_temp;
-    std::vector<SharedMatrix> G_local;
+    std::vector<SharedMatrix> G_local, GG_local;
     for (size_t i = 0; i < num_threads_; i++) {
         Q_temp.push_back(std::make_shared<Vector>("Quadrature Temp", max_points));
         G_local.push_back(std::make_shared<Matrix>("G Temp", natom, 3));
+        GG_local.push_back(std::make_shared<Matrix>("Grad temp", 3, max_points));
     }
 
     std::vector<double> functionalq(num_threads_);
@@ -3820,14 +3955,14 @@ SharedMatrix UV::compute_gradient() {
     // timer_off("V: V_XC");
     // => Master gradient loop <= //
 #pragma omp parallel for private(rank) schedule(dynamic) num_threads(num_threads_)
-    for (size_t Q = 0; Q < grid_->blocks().size(); Q++) {
+    for (size_t Q = 0; Q < gblocks.size(); Q++) {
         // ==> Per-thread setup <== //
 #ifdef _OPENMP
         rank = omp_get_thread_num();
 #endif
 
         auto fworker = functional_workers_[rank];
-        auto pworker = point_workers_[rank];
+        auto pworker = (grid_response ? grid_point_workers[rank] : point_workers_[rank]);
         auto QTp = Q_temp[rank]->pointer();
 
         auto Tap = pworker->scratch()[0]->pointer();
@@ -3842,7 +3977,7 @@ SharedMatrix UV::compute_gradient() {
         auto Gp = G_local[rank]->pointer();
 
         // ==> Per-block setup <== //
-        auto block = grid_->blocks()[Q];
+        auto block = gblocks[Q];
         auto npoints = block->npoints();
         auto x = block->x();
         auto y = block->y();
@@ -4086,6 +4221,88 @@ SharedMatrix UV::compute_gradient() {
                 }
             }
         }
+
+        if (grid_response) {
+            // => Grid-motion contributions <= //
+            // Convection of the local densities with the moving point plus the
+            // quadrature-weight response. Unlike the RKS path, the UKS gradient
+            // is accumulated at full scale (no factor-of-2 by the caller).
+            const size_t Aparent = block->parent_atom();
+            const double* rhoa_d1[3] = {pworker->point_value("RHO_AX")->pointer(),
+                                        pworker->point_value("RHO_AY")->pointer(),
+                                        pworker->point_value("RHO_AZ")->pointer()};
+            const double* rhob_d1[3] = {pworker->point_value("RHO_BX")->pointer(),
+                                        pworker->point_value("RHO_BY")->pointer(),
+                                        pworker->point_value("RHO_BZ")->pointer()};
+
+            double** GGp = GG_local[rank]->pointer();
+            GG_local[rank]->zero();
+
+            // Spin density Hessians rho^s_ab = 2 (phi_ab Ds phi + phi_a Ds phi_b);
+            // grad(TAU_s)_a = sum_b phi_ab Ds phi_b in the stored convention, and
+            // V_TAU holds 0.5 dF/dtau (see LibXCfunctional), hence the 2.
+            if (fworker->is_gga() || fworker->is_meta()) {
+                double** phi_d1[3] = {phi_x, phi_y, phi_z};
+                double** phi_xx2 = pworker->basis_value("PHI_XX")->pointer();
+                double** phi_xy2 = pworker->basis_value("PHI_XY")->pointer();
+                double** phi_xz2 = pworker->basis_value("PHI_XZ")->pointer();
+                double** phi_yy2 = pworker->basis_value("PHI_YY")->pointer();
+                double** phi_yz2 = pworker->basis_value("PHI_YZ")->pointer();
+                double** phi_zz2 = pworker->basis_value("PHI_ZZ")->pointer();
+                double** phi_d2[3][3] = {
+                    {phi_xx2, phi_xy2, phi_xz2}, {phi_xy2, phi_yy2, phi_yz2}, {phi_xz2, phi_yz2, phi_zz2}};
+
+                const double* v_gamma_aa = (fworker->is_gga() ? vals["V_GAMMA_AA"]->pointer() : nullptr);
+                const double* v_gamma_ab = (fworker->is_gga() ? vals["V_GAMMA_AB"]->pointer() : nullptr);
+                const double* v_gamma_bb = (fworker->is_gga() ? vals["V_GAMMA_BB"]->pointer() : nullptr);
+                const double* v_tau_a2 = (fworker->is_meta() ? vals["V_TAU_A"]->pointer() : nullptr);
+                const double* v_tau_b2 = (fworker->is_meta() ? vals["V_TAU_B"]->pointer() : nullptr);
+
+                // Ua := phi Da ; Ub := phi Db
+                C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi[0], coll_funcs, Dap[0], max_functions, 0.0,
+                        Uap[0], max_functions);
+                C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi[0], coll_funcs, Dbp[0], max_functions, 0.0,
+                        Ubp[0], max_functions);
+
+                for (int b = 0; b < 3; b++) {
+                    // Ta := phi_b Da ; Tb := phi_b Db
+                    C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi_d1[b][0], coll_funcs, Dap[0],
+                            max_functions, 0.0, Tap[0], max_functions);
+                    C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi_d1[b][0], coll_funcs, Dbp[0],
+                            max_functions, 0.0, Tbp[0], max_functions);
+                    for (int P = 0; P < npoints; P++) {
+                        for (int a = 0; a < 3; a++) {
+                            const double rhoa_ab =
+                                2.0 * (C_DDOT(nlocal, phi_d2[a][b][P], 1, Uap[P], 1) +
+                                       C_DDOT(nlocal, phi_d1[a][P], 1, Tap[P], 1));
+                            const double rhob_ab =
+                                2.0 * (C_DDOT(nlocal, phi_d2[a][b][P], 1, Ubp[P], 1) +
+                                       C_DDOT(nlocal, phi_d1[a][P], 1, Tbp[P], 1));
+                            if (v_gamma_aa) {
+                                GGp[a][P] += 2.0 * v_gamma_aa[P] * rhoa_ab * rhoa_d1[b][P] +
+                                             v_gamma_ab[P] * (rhoa_ab * rhob_d1[b][P] + rhob_ab * rhoa_d1[b][P]) +
+                                             2.0 * v_gamma_bb[P] * rhob_ab * rhob_d1[b][P];
+                            }
+                            if (v_tau_a2) {
+                                GGp[a][P] +=
+                                    2.0 * v_tau_a2[P] * C_DDOT(nlocal, phi_d2[a][b][P], 1, Tap[P], 1) +
+                                    2.0 * v_tau_b2[P] * C_DDOT(nlocal, phi_d2[a][b][P], 1, Tbp[P], 1);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (int P = 0; P < npoints; P++) {
+                Gp[Aparent][0] += w[P] * (v_rho_a[P] * rhoa_d1[0][P] + v_rho_b[P] * rhob_d1[0][P] + GGp[0][P]);
+                Gp[Aparent][1] += w[P] * (v_rho_a[P] * rhoa_d1[1][P] + v_rho_b[P] * rhob_d1[1][P] + GGp[1][P]);
+                Gp[Aparent][2] += w[P] * (v_rho_a[P] * rhoa_d1[2][P] + v_rho_b[P] * rhob_d1[2][P] + GGp[2][P]);
+            }
+
+            // => Quadrature-weight derivatives <= //
+            ggrid->block_weight_gradient(block, zk, 1.0, G_local[rank]);
+        }
+
         Ua_local.reset();
         Ub_local.reset();
         parallel_timer_off("V_xc gradient", rank);
