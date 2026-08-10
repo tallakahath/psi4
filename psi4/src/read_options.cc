@@ -1904,7 +1904,8 @@ int read_options(const std::string &name, Options &options, bool suppress_printi
         /*- Include the grid response (grid-point position and quadrature-weight
         derivatives) of the semilocal XC quadrature in DFT gradients. Makes the
         gradient exact with respect to the discrete XC energy at O(natom^2)
-        extra cost per grid point. -*/
+        extra cost per grid point, up to the neglected grid standard-orientation
+        response (below 1e-5 in validation). -*/
         options.add_bool("DFT_GRID_RESPONSE", false);
         /*- Parameters defining the dispersion correction. See Table
         :ref:`-D Functionals <table:dft_disp>` for default values and Table
