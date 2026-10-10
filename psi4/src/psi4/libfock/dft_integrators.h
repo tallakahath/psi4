@@ -379,6 +379,71 @@ inline void rks_gradient_integrator(std::shared_ptr<BasisSet> primary, std::shar
     }
 }
 
+// Grid-motion (convection) contribution for a block whose points ride a single
+// parent nucleus: each point moves with the nucleus, so dE/dR_A picks up
+//   scale * w_P * (v_rho grad(rho) + v_gamma grad(gamma))
+// with grad(gamma)_a = 2 sum_b rho_ab rho_b and the density Hessian
+//   rho_ab = 4 * (phi_ab D phi + phi_a D phi_b).
+// Requires an ATOMIC-blocked grid and second basis derivatives for GGA. The
+// quadrature-weight response is separate (MolecularGrid::block_weight_gradient).
+inline void rks_grid_motion_integrator(std::shared_ptr<BlockOPoints> block, std::shared_ptr<SuperFunctional> fworker,
+                                       std::shared_ptr<PointFunctions> pworker, SharedMatrix G, SharedMatrix U,
+                                       SharedMatrix GG, double scale) {
+    const size_t Aparent = block->parent_atom();
+    const int npoints = block->npoints();
+    const double* w = block->w();
+    const int nlocal = block->functions_local_to_global().size();
+    auto max_functions = U->ncol();
+
+    double** Gp = G->pointer();
+    double** Up = U->pointer();
+    double** GGp = GG->pointer();
+    double** Tp = pworker->scratch()[0]->pointer();
+    double** Dp = pworker->D_scratch()[0]->pointer();
+
+    double** phi = pworker->basis_value("PHI")->pointer();
+    const int coll_funcs = pworker->basis_value("PHI")->ncol();
+    const double* rho_d1[3] = {pworker->point_value("RHO_AX")->pointer(), pworker->point_value("RHO_AY")->pointer(),
+                               pworker->point_value("RHO_AZ")->pointer()};
+    const double* v_rho = fworker->value("V_RHO_A")->pointer();
+
+    GG->zero();
+    if (fworker->is_gga()) {
+        double** phi_d1[3] = {pworker->basis_value("PHI_X")->pointer(), pworker->basis_value("PHI_Y")->pointer(),
+                              pworker->basis_value("PHI_Z")->pointer()};
+        double** phi_xx = pworker->basis_value("PHI_XX")->pointer();
+        double** phi_xy = pworker->basis_value("PHI_XY")->pointer();
+        double** phi_xz = pworker->basis_value("PHI_XZ")->pointer();
+        double** phi_yy = pworker->basis_value("PHI_YY")->pointer();
+        double** phi_yz = pworker->basis_value("PHI_YZ")->pointer();
+        double** phi_zz = pworker->basis_value("PHI_ZZ")->pointer();
+        double** phi_d2[3][3] = {{phi_xx, phi_xy, phi_xz}, {phi_xy, phi_yy, phi_yz}, {phi_xz, phi_yz, phi_zz}};
+        const double* v_gamma = fworker->value("V_GAMMA_AA")->pointer();
+
+        // U := phi D
+        C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi[0], coll_funcs, Dp[0], max_functions, 0.0, Up[0],
+                max_functions);
+        for (int b = 0; b < 3; b++) {
+            // T := phi_b D
+            C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi_d1[b][0], coll_funcs, Dp[0], max_functions, 0.0,
+                    Tp[0], max_functions);
+            for (int P = 0; P < npoints; P++) {
+                for (int a = 0; a < 3; a++) {
+                    const double rho_ab = 4.0 * (C_DDOT(nlocal, phi_d2[a][b][P], 1, Up[P], 1) +
+                                                 C_DDOT(nlocal, phi_d1[a][P], 1, Tp[P], 1));
+                    GGp[a][P] += 2.0 * v_gamma[P] * rho_ab * rho_d1[b][P];
+                }
+            }
+        }
+    }
+
+    for (int P = 0; P < npoints; P++) {
+        for (int a = 0; a < 3; a++) {
+            Gp[Aparent][a] += scale * w[P] * (v_rho[P] * rho_d1[a][P] + GGp[a][P]);
+        }
+    }
+}
+
 }  // namespace dft_integrators
 }  // namespace psi
 #endif
