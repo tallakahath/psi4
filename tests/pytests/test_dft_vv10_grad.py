@@ -28,6 +28,11 @@ _NH2 = """
     pytest.param("BLYP-NL", "uks", _NH2, (50, 194), 4, id="BLYP-NL UKS doublet"),
     # Meta-GGA host: regression for stale V_TAU_A in the VV10 gradient path.
     pytest.param("wB97M-V", "rks", _HCN, (50, 194), 4, id="wB97M-V RKS"),
+    # Coarse NL grid at tight tolerance: only passes if the grid-motion
+    # terms (point-position, density, and weight response) are included in
+    # the analytic gradient; the density-response-only gradient is off by
+    # ~1e-4 here.
+    pytest.param("BLYP-NL", "rks", _HCN, (20, 74), 5, id="BLYP-NL RKS coarse NL grid"),
 ])
 def test_vv10_gradient(func, ref_key, geom, nl_grid, digits):
     psi4.set_num_threads(1)
