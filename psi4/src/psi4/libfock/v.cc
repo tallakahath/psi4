@@ -3799,7 +3799,8 @@ SharedMatrix UV::compute_gradient() {
 
     // => Optional grid response <= //
     // Same machinery as RV::compute_gradient: an ATOMIC-blocked copy of the
-    // grid (identical quadrature) so each block knows its parent atom.
+    // grid so each block knows its parent atom (same quadrature; per-block
+    // basis screening can differ at the DFT_BASIS_TOLERANCE level).
     const bool grid_response = options_.get_bool("DFT_GRID_RESPONSE");
     std::shared_ptr<DFTGrid> ggrid;
     std::vector<std::shared_ptr<PointFunctions>> grid_point_workers;
@@ -3827,7 +3828,7 @@ SharedMatrix UV::compute_gradient() {
     for (size_t i = 0; i < num_threads_; i++) {
         Q_temp.push_back(std::make_shared<Vector>("Quadrature Temp", max_points));
         G_local.push_back(std::make_shared<Matrix>("G Temp", natom, 3));
-        GG_local.push_back(std::make_shared<Matrix>("Grad temp", 3, max_points));
+        if (grid_response) GG_local.push_back(std::make_shared<Matrix>("Grad temp", 3, max_points));
     }
 
     std::vector<double> functionalq(num_threads_);
@@ -4112,9 +4113,7 @@ SharedMatrix UV::compute_gradient() {
 
         if (grid_response) {
             // => Grid-motion contributions <= //
-            // Convection of the local densities with the moving point plus the
-            // quadrature-weight response. Unlike the RKS path, the UKS gradient
-            // is accumulated at full scale (no factor-of-2 by the caller).
+            // Full scale here; the UKS gradient has no factor-of-2 by the caller.
             const size_t Aparent = block->parent_atom();
             const double* rhoa_d1[3] = {pworker->point_value("RHO_AX")->pointer(),
                                         pworker->point_value("RHO_AY")->pointer(),
@@ -4146,14 +4145,12 @@ SharedMatrix UV::compute_gradient() {
                 const double* v_tau_a2 = (fworker->is_meta() ? vals["V_TAU_A"]->pointer() : nullptr);
                 const double* v_tau_b2 = (fworker->is_meta() ? vals["V_TAU_B"]->pointer() : nullptr);
 
-                // Ua := phi Da ; Ub := phi Db
                 C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi[0], coll_funcs, Dap[0], max_functions, 0.0,
                         Uap[0], max_functions);
                 C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi[0], coll_funcs, Dbp[0], max_functions, 0.0,
                         Ubp[0], max_functions);
 
                 for (int b = 0; b < 3; b++) {
-                    // Ta := phi_b Da ; Tb := phi_b Db
                     C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi_d1[b][0], coll_funcs, Dap[0],
                             max_functions, 0.0, Tap[0], max_functions);
                     C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi_d1[b][0], coll_funcs, Dbp[0],
