@@ -3005,6 +3005,10 @@ double NuclearWeightMgr::StratmannStepFunctionDerivative(double mu) {
     return -0.5 * (35.0 * omx2 * omx2 * omx2 / 16.0) / a;
 }
 
+// Partition weights are products of step functions and can underflow toward
+// denormals; below this a cell and its derivative are treated as zero.
+static const double kDeadCellWeight = 1.0e-250;
+
 void NuclearWeightMgr::computeWeightGradient(MassPoint mp, int A, double stratmannCutoff, double* wgrad) const {
     int natom = molecule_->natom();
     std::fill(wgrad, wgrad + 3 * natom, 0.0);
@@ -3055,7 +3059,7 @@ void NuclearWeightMgr::computeWeightGradient(MassPoint mp, int A, double stratma
             double s = stepFunction(nu);
             s_row[j] = s;
             prod *= s;
-            if (prod < 1.0e-250) {
+            if (prod < kDeadCellWeight) {
                 // Cell is dead; its derivative is negligible as well (the step
                 // functions flatten out where they vanish).
                 dead = true;
@@ -4582,7 +4586,7 @@ void MolecularGrid::block_weight_gradient(std::shared_ptr<BlockOPoints> block, c
         // Stored weights are w_rad * w_partition; recover w_rad so the
         // partition derivative can be rescaled to a full weight derivative.
         double wpart = nuclear_weight_mgr_->computeNuclearWeight(mp, A, cutoff);
-        if (std::abs(wpart) < 1.0e-250) continue;
+        if (std::abs(wpart) < kDeadCellWeight) continue;
         double pref = scale * f[P] * (w[P] / wpart);
 
         nuclear_weight_mgr_->computeWeightGradient(mp, A, cutoff, wgrad.data());
