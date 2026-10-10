@@ -184,10 +184,12 @@ class SuperFunctional {
                                                            std::shared_ptr<BlockOPoints> block, double rho_thresh,
                                                            int npoints = -1, bool internal = false);
 
-    // Copmutes the Cache data for VV10 dispersion
+    // Computes the VV10 kernel between this block (left) and the cached grid
+    // (right). rho_thresh must match the cache's for symmetric screening.
     double compute_vv10_kernel(const std::map<std::string, SharedVector>& vals,
                                const std::vector<std::map<std::string, SharedVector>>& vv10_cache,
-                               std::shared_ptr<BlockOPoints> block, int npoints = -1, bool do_grad = false);
+                               std::shared_ptr<BlockOPoints> block, double rho_thresh, int npoints = -1,
+                               bool do_grad = false);
 
     // => Input/Output <= //
 

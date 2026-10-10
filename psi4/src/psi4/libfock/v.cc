@@ -945,7 +945,7 @@ double VBase::vv10_nlc(SharedMatrix D, SharedMatrix ret) {
         std::map<std::string, SharedVector> vals = fworker->values();
 
         parallel_timer_on("Kernel", rank);
-        vv10_exc[rank] += fworker->compute_vv10_kernel(pworker->point_values(), vv10_cache, block);
+        vv10_exc[rank] += fworker->compute_vv10_kernel(pworker->point_values(), vv10_cache, block, vv10_rho_cutoff_);
         parallel_timer_off("Kernel", rank);
 
         parallel_timer_on("VV10 Fock", rank);
@@ -1040,7 +1040,8 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
         std::map<std::string, SharedVector> vals = fworker->values();
 
         parallel_timer_on("Kernel", rank);
-        vv10_exc[rank] += fworker->compute_vv10_kernel(pworker->point_values(), vv10_cache, block, npoints, true);
+        vv10_exc[rank] += fworker->compute_vv10_kernel(pworker->point_values(), vv10_cache, block, vv10_rho_cutoff_,
+                                                       npoints, true);
         parallel_timer_off("Kernel", rank);
 
         parallel_timer_on("V_xc gradient", rank);
