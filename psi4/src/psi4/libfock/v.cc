@@ -1055,6 +1055,12 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
         // exactly translationally invariant. All contributions use the same
         // half-gradient convention as rks_gradient_integrator (the caller
         // applies the factor of 2).
+        // One channel remains neglected here and in the DFT_GRID_RESPONSE
+        // terms: the grid standard-orientation response (OrientationMgr
+        // rotates each atomic grid with the molecular geometry, so grids also
+        // rotate slightly as nuclei move). Below 1e-5 in all validation so
+        // far; a future fix should make the orientation geometry-independent
+        // rather than differentiate it.
         const size_t Aparent = block->parent_atom();
         double** Gp = G_local[rank]->pointer();
 
