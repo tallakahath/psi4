@@ -918,13 +918,13 @@ std::map<std::string, SharedVector> SuperFunctional::compute_vv10_cache(const st
 }
 double SuperFunctional::compute_vv10_kernel(const std::map<std::string, SharedVector>& vals,
                                             const std::vector<std::map<std::string, SharedVector>>& vv10_cache,
-                                            std::shared_ptr<BlockOPoints> block, int npoints, bool do_grad) {
+                                            std::shared_ptr<BlockOPoints> block, double rho_thresh, int npoints,
+                                            bool do_grad) {
     // Kernel between left (*this) and right (vv10_cache) grids
 
     // Compute the vv10 cache in place
-    const double l_thresh = 1.e-12;
     const size_t l_npoints = block->npoints();
-    compute_vv10_cache(vals, block, l_thresh, block->npoints(), true);
+    compute_vv10_cache(vals, block, rho_thresh, block->npoints(), true);
 
     // Grab values to update
     double vv10_e = 0.0;
@@ -956,7 +956,7 @@ double SuperFunctional::compute_vv10_kernel(const std::map<std::string, SharedVe
         v_rho[i] = vv10_beta;
         v_gamma[i] = 0.0;
 
-        if (l_rho[i] < l_thresh) continue;
+        if (l_rho[i] < rho_thresh) continue;
 
         // Compute interior kernel
         double phi = 0.0;
