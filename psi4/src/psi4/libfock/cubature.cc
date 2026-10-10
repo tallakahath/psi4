@@ -3037,9 +3037,8 @@ void NuclearWeightMgr::computeWeightGradient(MassPoint mp, int A, double stratma
     }
 
     // Cell functions P_i and their position derivatives at fixed point r.
-    // dP_i/dR_B is nonzero only for B in {i, j}; we only ever need the row
-    // for the parent cell (i == A) and the sum over all cells, so accumulate
-    // those two natom x 3 arrays directly.
+    // Only the parent row dP_A/dR_B and the sum over cells are needed, so
+    // accumulate those two natom x 3 arrays directly.
     std::vector<double> dPA(3 * natom, 0.0);   // dP_A/dR_B
     std::vector<double> dPsum(3 * natom, 0.0); // sum_i dP_i/dR_B
     double PA = 0.0;
@@ -3048,7 +3047,6 @@ void NuclearWeightMgr::computeWeightGradient(MassPoint mp, int A, double stratma
     std::vector<double> s_row(natom);
 
     for (int i = 0; i < natom; i++) {
-        // First pass: cell product
         double prod = 1;
         bool dead = false;
         for (int j = 0; j < natom; j++) {
@@ -3060,8 +3058,6 @@ void NuclearWeightMgr::computeWeightGradient(MassPoint mp, int A, double stratma
             s_row[j] = s;
             prod *= s;
             if (prod < kDeadCellWeight) {
-                // Cell is dead; its derivative is negligible as well (the step
-                // functions flatten out where they vanish).
                 dead = true;
                 break;
             }
@@ -3073,10 +3069,11 @@ void NuclearWeightMgr::computeWeightGradient(MassPoint mp, int A, double stratma
         Z += prod;
         if (i == A) PA = prod;
 
-        // Second pass: dP_i/dR_B = P_i sum_j (s'/s) dnu_ij/dR_B
+        // dP_i/dR_B = P_i sum_j (s'/s) dnu_ij/dR_B
         for (int j = 0; j < natom; j++) {
             if (i == j) continue;
             double s = s_row[j];
+            // s' vanishes with s, so the dropped term P_i s'/s is below ~1e-11.
             if (s < 1.0e-14) continue;
 
             double inv_rij = inv_dist_[i][j];

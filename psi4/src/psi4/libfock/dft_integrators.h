@@ -420,13 +420,10 @@ inline void rks_grid_motion_integrator(std::shared_ptr<BlockOPoints> block, std:
         double** phi_d2[3][3] = {{phi_xx, phi_xy, phi_xz}, {phi_xy, phi_yy, phi_yz}, {phi_xz, phi_yz, phi_zz}};
         const double* v_gamma = fworker->value("V_GAMMA_AA")->pointer();
 
-        // Density Hessian in the RKS half-convention:
-        // rho_ab = 4 (phi_ab D phi + phi_a D phi_b), built from U := phi D and T := phi_b D.
-        // U := phi D
+        // Density Hessian (half-convention) from U := phi D and T := phi_b D.
         C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi[0], coll_funcs, Dp[0], max_functions, 0.0, Up[0],
                 max_functions);
         for (int b = 0; b < 3; b++) {
-            // T := phi_b D
             C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi_d1[b][0], coll_funcs, Dp[0], max_functions, 0.0,
                     Tp[0], max_functions);
             for (int P = 0; P < npoints; P++) {

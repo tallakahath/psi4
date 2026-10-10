@@ -21,8 +21,7 @@ _HCN = """
     pytest.param("BLYP", "rks", _HCN, id="BLYP RKS"),
 ])
 def test_dft_grid_response_gradient(func, ref_key, geom):
-    # A deliberately coarse grid, where the neglected grid response leaves the
-    # analytic gradient 1e-4 to 2e-3 away from finite differences; with
+    # Deliberately coarse grid so the neglected grid response is visible; with
     # DFT_GRID_RESPONSE the agreement must return to the findif noise floor.
     psi4.set_num_threads(1)
 

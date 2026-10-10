@@ -1958,10 +1958,10 @@ SharedMatrix RV::compute_gradient() {
     }
 
     // => Optional grid response <= //
-    // The grid-motion terms need each block on a single parent atom, so run
-    // the gradient loop over an ATOMIC-blocked copy of the grid (identical
-    // quadrature points and weights; only the grouping differs) with point
-    // workers sized for it.
+    // The grid-motion terms need each block on a single parent atom, so the
+    // gradient loop runs over an ATOMIC-blocked copy of the grid. The
+    // quadrature points and weights are identical; per-block basis screening
+    // can differ at the DFT_BASIS_TOLERANCE level.
     const bool grid_response = options_.get_bool("DFT_GRID_RESPONSE");
     std::shared_ptr<DFTGrid> ggrid;
     std::vector<std::shared_ptr<PointFunctions>> grid_point_workers;
@@ -1991,7 +1991,7 @@ SharedMatrix RV::compute_gradient() {
     for (size_t i = 0; i < num_threads_; i++) {
         G_local.push_back(std::make_shared<Matrix>("G Temp", natom, 3));
         U_local.push_back(std::make_shared<Matrix>("U Temp", max_points, max_functions));
-        GG_local.push_back(std::make_shared<Matrix>("Grad temp", 3, max_points));
+        if (grid_response) GG_local.push_back(std::make_shared<Matrix>("Grad temp", 3, max_points));
     }
 
     std::vector<double> functionalq(num_threads_);
@@ -2038,10 +2038,7 @@ SharedMatrix RV::compute_gradient() {
 
         if (grid_response) {
             // => Grid-motion contributions <= //
-            // Each quadrature point rides its parent nucleus, so dE/dR_A picks
-            // up the change of the local densities at the moving point and the
-            // response of the nuclear-partition quadrature weights. Same
-            // half-gradient convention as rks_gradient_integrator.
+            // Half-gradient convention, as rks_gradient_integrator.
             dft_integrators::rks_grid_motion_integrator(block, fworker, pworker, G_local[rank], U_local[rank],
                                                         GG_local[rank], 0.5);
 
