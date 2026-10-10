@@ -1047,24 +1047,17 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
 
         // => Grid-motion contributions <= //
         // Each quadrature point rides its parent nucleus (hence ATOMIC blocking),
-        // so dE/dR_A picks up dE/dr_i for every point i centered on atom A:
-        //   1) the explicit |r_i - r_j| dependence of the VV10 kernel (GRID_W*)
-        //   2) the change in rho/gamma as the point moves through the density
-        //   3) the response of the nuclear-partition quadrature weights
-        // Together with the basis-function term above, these make the gradient
-        // exactly translationally invariant. All contributions use the same
-        // half-gradient convention as rks_gradient_integrator (the caller
-        // applies the factor of 2).
-        // One channel remains neglected here and in the DFT_GRID_RESPONSE
-        // terms: the grid standard-orientation response (OrientationMgr
-        // rotates each atomic grid with the molecular geometry, so grids also
-        // rotate slightly as nuclei move). Below 1e-5 in all validation so
-        // far; a future fix should make the orientation geometry-independent
-        // rather than differentiate it.
+        // so dE/dR_A picks up dE/dr_i for every point centered on atom A. All
+        // terms use the half-gradient convention of rks_gradient_integrator.
+        // Two approximations remain: the grid orientation is held frozen
+        // (OrientationMgr rotates atomic grids with the geometry), and the
+        // left/right VV10 screening thresholds differ (1e-12 in
+        // compute_vv10_kernel vs DFT_VV10_RHO_CUTOFF), so the pair forces are
+        // only antisymmetric for points above both cutoffs.
         const size_t Aparent = block->parent_atom();
         double** Gp = G_local[rank]->pointer();
 
-        // => Term 1: explicit kernel dependence on the grid point positions <= //
+        // Explicit kernel dependence on the grid point positions
         const double* grid_wx = fworker->vv_value("GRID_WX")->pointer();
         const double* grid_wy = fworker->vv_value("GRID_WY")->pointer();
         const double* grid_wz = fworker->vv_value("GRID_WZ")->pointer();
@@ -1074,15 +1067,12 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
             Gp[Aparent][2] += 0.5 * grid_wz[P];
         }
 
-        // => Term 2: density variation at the moving point <= //
+        // Density variation at the moving point
         dft_integrators::rks_grid_motion_integrator(block, fworker, pworker, G_local[rank], U_local[rank],
                                                     GG_local[rank], 0.5);
 
-        // => Term 3: quadrature-weight derivatives <= //
-        // The nuclear partition weights depend on all nuclear positions.
-        // Individually, terms 1+2 and this term are O(1) even in the
-        // fine-grid limit; only their sum is a small quadrature artifact,
-        // so the position terms above must not be added without this one.
+        // Quadrature-weight derivatives. The position terms above and this one
+        // are each O(1); only their sum is a small quadrature artifact.
         const double* eps_grid = fworker->vv_value("GRID_EPS")->pointer();
         nlgrid.block_weight_gradient(block, eps_grid, 0.5, G_local[rank]);
 

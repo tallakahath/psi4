@@ -1057,7 +1057,8 @@ double SuperFunctional::compute_vv10_kernel(const std::map<std::string, SharedVe
             y_grid[i] += l_rho[i] * l_w[i] * yc;
             z_grid[i] += l_rho[i] * l_w[i] * zc;
             // dE/dw_i: the 1/2 of the double sum cancels against the two
-            // appearances of w_i (as left and as right point).
+            // appearances of w_i (as left and as right point). Exact only
+            // where the left and right screening thresholds agree.
             eps_grid[i] += l_rho[i] * phi;
         }
     }
