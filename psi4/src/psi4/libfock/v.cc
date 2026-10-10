@@ -1997,9 +1997,6 @@ SharedMatrix RV::compute_gradient() {
     std::shared_ptr<DFTGrid> ggrid;
     std::vector<std::shared_ptr<PointFunctions>> grid_point_workers;
     if (grid_response) {
-        if (functional_->is_meta()) {
-            throw PSIEXCEPTION("V: DFT_GRID_RESPONSE is not yet implemented for meta-GGA gradients.");
-        }
         std::map<std::string, std::string> opt_map;
         opt_map["DFT_BLOCK_SCHEME"] = "ATOMIC";
         std::map<std::string, int> opt_int_map;
@@ -2010,7 +2007,7 @@ SharedMatrix RV::compute_gradient() {
             auto point_tmp = std::make_shared<RKSFunctions>(primary_, max_points, max_functions);
             // The convection term needs grad(rho) even for LDA functionals
             point_tmp->set_ansatz(std::max(ansatz, 1));
-            point_tmp->set_deriv((functional_->is_gga() ? 2 : 1));
+            point_tmp->set_deriv((functional_->is_gga() || functional_->is_meta() ? 2 : 1));
             point_tmp->set_pointers(D_AO_[0]);
             grid_point_workers.push_back(point_tmp);
         }

@@ -21,6 +21,7 @@ _HCN = """
     pytest.param("SVWN", "rks", _HCN, "STRATMANN", id="SVWN RKS Stratmann"),
     pytest.param("SVWN", "rks", _HCN, "SBECKE", id="SVWN RKS smooth Becke"),
     pytest.param("BLYP", "rks", _HCN, "TREUTLER", id="BLYP RKS"),
+    pytest.param("TPSS", "rks", _HCN, "TREUTLER", id="TPSS RKS"),
 ])
 def test_dft_grid_response_gradient(func, ref_key, geom, scheme):
     # Deliberately coarse grid so the neglected grid response is visible; with
