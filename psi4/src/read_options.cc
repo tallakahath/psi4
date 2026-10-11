@@ -1903,6 +1903,11 @@ int read_options(const std::string &name, Options &options, bool suppress_printi
         options.add_bool("DFT_REMOVE_DISTANT_POINTS",true);
         /*- The blocking scheme for DFT. !expert -*/
         options.add_str("DFT_BLOCK_SCHEME", "OCTREE", "NAIVE OCTREE ATOMIC");
+        /*- Include the grid response (grid-point position and quadrature-weight
+        derivatives) of the semilocal XC quadrature in DFT gradients. Makes the
+        gradient exact with respect to the discrete XC energy at O(natom^2)
+        extra cost per grid point, with the grid orientation held frozen. -*/
+        options.add_bool("DFT_GRID_RESPONSE", false);
         /*- Parameters defining the dispersion correction. See Table
         :ref:`-D Functionals <table:dft_disp>` for default values and Table
         :ref:`Dispersion Corrections <table:dashd>` for the order in which

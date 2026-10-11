@@ -40,6 +40,7 @@
 #include "psi4/libmints/molecule.h"
 #include "psi4/libmints/matrix.h"
 
+#include <array>
 #include <vector>
 #include <string>
 #include <sstream>
@@ -2790,6 +2791,8 @@ class NuclearWeightMgr {
     static double SmoothBeckeMu(double ri, double rj, double inv_rij);
     static double BeckeStepFunction(double x);
     static double StratmannStepFunction(double mu);
+    static double BeckeStepFunctionDerivative(double x);
+    static double StratmannStepFunctionDerivative(double mu);
 
     // Becke says u = (chi-1)/(chi+1), a = u/(u^2-1), then clip so that |a| <= 1/2.
     // We can save a step and find `a' directly from chi.
@@ -2806,6 +2809,11 @@ class NuclearWeightMgr {
     ~NuclearWeightMgr();
     double GetStratmannCutoff(int A) const;
     double computeNuclearWeight(MassPoint mp, int A, double stratmannCutoff) const;
+    // Total derivative of the partition weight P_A/Z w.r.t. every nuclear
+    // position, with the grid point riding its parent atom A. Fills
+    // wgrad[3*B + c] for all B; the parent-atom row is closed by
+    // translational invariance.
+    void computeWeightGradient(MassPoint mp, int A, double stratmannCutoff, double* wgrad) const;
 };
 
 const char *NuclearWeightMgr::nuclearschemenames[] = {"NAIVE", "BECKE", "TREUTLER", "STRATMANN",
@@ -2978,6 +2986,158 @@ double NuclearWeightMgr::computeNuclearWeight(MassPoint mp, int A, double stratm
         denominator += prod;
     }
     return numerator / denominator;
+}
+
+double NuclearWeightMgr::BeckeStepFunctionDerivative(double x) {
+    // s(x) = (1 - p(p(p(x))))/2, p(x) = x(3 - x^2)/2, p'(x) = 3(1 - x^2)/2
+    double p1 = x * (3 - x * x) / 2;
+    double p2 = p1 * (3 - p1 * p1) / 2;
+    return -0.5 * (1.5 * (1 - p2 * p2)) * (1.5 * (1 - p1 * p1)) * (1.5 * (1 - x * x));
+}
+
+double NuclearWeightMgr::StratmannStepFunctionDerivative(double mu) {
+    const double a = 0.64;
+    if (mu <= -a || mu >= a) return 0;
+    double x = mu / a;
+    double x2 = x * x;
+    double omx2 = 1 - x2;
+    // s(mu) = (1 - z(mu/a))/2, z'(x) = 35 (1 - x^2)^3 / 16
+    return -0.5 * (35.0 * omx2 * omx2 * omx2 / 16.0) / a;
+}
+
+// Partition weights are products of step functions and can underflow toward
+// denormals; below this a cell and its derivative are treated as zero.
+static const double kDeadCellWeight = 1.0e-250;
+
+void NuclearWeightMgr::computeWeightGradient(MassPoint mp, int A, double stratmannCutoff, double* wgrad) const {
+    int natom = molecule_->natom();
+    std::fill(wgrad, wgrad + 3 * natom, 0.0);
+    if (natom < 2) return;
+
+    // Inside the Stratmann sphere the weight is 1 in a neighborhood of the
+    // current geometry, so its gradient vanishes.
+    if (scheme_ == STRATMANN && distToAtom(mp, A) <= stratmannCutoff) return;
+
+    double (*stepFunction)(double) = (scheme_ == STRATMANN) ? StratmannStepFunction : BeckeStepFunction;
+    double (*stepDerivative)(double) = (scheme_ == STRATMANN) ? StratmannStepFunctionDerivative
+                                                              : BeckeStepFunctionDerivative;
+    static const double RCut = 5.0;  // Must match SmoothBeckeMu
+    static const double invRCut = 1.0 / RCut;
+
+    // Distances and unit vectors from each atom to the point
+    std::vector<double> dist(natom);
+    std::vector<std::array<double, 3>> u(natom);
+    for (int l = 0; l < natom; l++) {
+        double dx = mp.x - molecule_->x(l);
+        double dy = mp.y - molecule_->y(l);
+        double dz = mp.z - molecule_->z(l);
+        dist[l] = sqrt(dx * dx + dy * dy + dz * dz);
+        double invd = (dist[l] > 0) ? 1.0 / dist[l] : 0.0;
+        u[l] = {dx * invd, dy * invd, dz * invd};
+    }
+
+    // Cell functions P_i and their position derivatives at fixed point r.
+    // Only the parent row dP_A/dR_B and the sum over cells are needed, so
+    // accumulate those two natom x 3 arrays directly.
+    std::vector<double> dPA(3 * natom, 0.0);   // dP_A/dR_B
+    std::vector<double> dPsum(3 * natom, 0.0); // sum_i dP_i/dR_B
+    double PA = 0.0;
+    double Z = 0.0;
+
+    std::vector<double> s_row(natom);
+
+    for (int i = 0; i < natom; i++) {
+        double prod = 1;
+        bool dead = false;
+        for (int j = 0; j < natom; j++) {
+            if (i == j) continue;
+            double mu = (scheme_ == SBECKE) ? SmoothBeckeMu(dist[i], dist[j], inv_dist_[i][j])
+                                            : BeckeMu(dist[i], dist[j], inv_dist_[i][j]);
+            double nu = mu + amatrix_[i][j] * (1 - mu * mu);
+            double s = stepFunction(nu);
+            s_row[j] = s;
+            prod *= s;
+            if (prod < kDeadCellWeight) {
+                dead = true;
+                break;
+            }
+        }
+        if (dead) {
+            if (i == A) PA = 0.0;
+            continue;
+        }
+        Z += prod;
+        if (i == A) PA = prod;
+
+        // dP_i/dR_B = P_i sum_j (s'/s) dnu_ij/dR_B
+        for (int j = 0; j < natom; j++) {
+            if (i == j) continue;
+            double s = s_row[j];
+            // s' vanishes with s, so the dropped term P_i s'/s is below ~1e-11.
+            if (s < 1.0e-14) continue;
+
+            double inv_rij = inv_dist_[i][j];
+            bool clamped_inv = false;
+            double inv_eff = inv_rij;
+            if (scheme_ == SBECKE && inv_rij < invRCut) {
+                inv_eff = invRCut;
+                clamped_inv = true;
+            }
+            double mu_raw = (dist[i] - dist[j]) * inv_eff;
+            if (scheme_ == SBECKE && (mu_raw <= -1.0 || mu_raw >= 1.0)) continue;  // clipped: flat
+            double mu = mu_raw;
+            double nu = mu + amatrix_[i][j] * (1 - mu * mu);
+            double c = (1 - 2 * amatrix_[i][j] * mu) * stepDerivative(nu) / s;
+
+            // e_ij = (R_i - R_j)/R_ij; the mu e_ij piece comes from d(1/R_ij).
+            // When SBECKE clamps 1/R_ij to 1/RCut that dependence is gone.
+            double ex = 0, ey = 0, ez = 0;
+            if (!clamped_inv) {
+                ex = (molecule_->x(i) - molecule_->x(j)) * inv_rij;
+                ey = (molecule_->y(i) - molecule_->y(j)) * inv_rij;
+                ez = (molecule_->z(i) - molecule_->z(j)) * inv_rij;
+            }
+
+            // dmu/dR_i = -(u_i + mu e_ij) * inv_eff ; dmu/dR_j = +(u_j + mu e_ij) * inv_eff
+            double gi[3] = {-(u[i][0] + mu * ex) * inv_eff, -(u[i][1] + mu * ey) * inv_eff,
+                            -(u[i][2] + mu * ez) * inv_eff};
+            double gj[3] = {(u[j][0] + mu * ex) * inv_eff, (u[j][1] + mu * ey) * inv_eff,
+                            (u[j][2] + mu * ez) * inv_eff};
+
+            for (int c3 = 0; c3 < 3; c3++) {
+                double di = prod * c * gi[c3];
+                double dj = prod * c * gj[c3];
+                dPsum[3 * i + c3] += di;
+                dPsum[3 * j + c3] += dj;
+                if (i == A) {
+                    dPA[3 * i + c3] += di;
+                    dPA[3 * j + c3] += dj;
+                }
+            }
+        }
+    }
+
+    if (Z <= 0.0) return;
+    double wA = PA / Z;
+
+    // Partial derivatives at fixed r for B != A; the parent-atom row follows
+    // from translational invariance (the point rides atom A).
+    double sx = 0, sy = 0, sz = 0;
+    for (int B = 0; B < natom; B++) {
+        if (B == A) continue;
+        double gx = (dPA[3 * B + 0] - wA * dPsum[3 * B + 0]) / Z;
+        double gy = (dPA[3 * B + 1] - wA * dPsum[3 * B + 1]) / Z;
+        double gz = (dPA[3 * B + 2] - wA * dPsum[3 * B + 2]) / Z;
+        wgrad[3 * B + 0] = gx;
+        wgrad[3 * B + 1] = gy;
+        wgrad[3 * B + 2] = gz;
+        sx += gx;
+        sy += gy;
+        sz += gz;
+    }
+    wgrad[3 * A + 0] = -sx;
+    wgrad[3 * A + 1] = -sy;
+    wgrad[3 * A + 2] = -sz;
 }
 
 class OrientationMgr {
@@ -3728,7 +3888,8 @@ void MolecularGrid::buildGridFromOptions(MolecularGridOptions const &opt) {
 
     OrientationMgr std_orientation(molecule_);
     RadialPruneMgr prune(opt);
-    NuclearWeightMgr nuc(molecule_, opt.nucscheme);
+    nuclear_weight_mgr_ = std::make_shared<NuclearWeightMgr>(molecule_, opt.nucscheme);
+    NuclearWeightMgr& nuc = *nuclear_weight_mgr_;
     double weightcut = opt.weights_cutoff;
 
     // RMP: Like, I want to keep this info, yo?
@@ -4393,6 +4554,44 @@ void MolecularGrid::block(int max_points, int min_points, double max_radius) {
     blocks_ = blocker->blocks();
     if (options_.blockscheme == "ATOMIC") {
         atomic_blocks_ = blocker->atomic_blocks();
+    }
+}
+
+void MolecularGrid::block_weight_gradient(std::shared_ptr<BlockOPoints> block, const double* f, double scale,
+                                          std::shared_ptr<Matrix> G) const {
+    if (!nuclear_weight_mgr_) {
+        throw PSIEXCEPTION("MolecularGrid::block_weight_gradient: grid was not built from options.");
+    }
+    int natom = molecule_->natom();
+    if (natom < 2) return;
+
+    size_t A = block->parent_atom();  // Throws unless ATOMIC blocking was used
+    double cutoff = nuclear_weight_mgr_->GetStratmannCutoff(A);
+
+    const double* x = block->x();
+    const double* y = block->y();
+    const double* z = block->z();
+    const double* w = block->w();
+
+    std::vector<double> wgrad(3 * natom);
+    double** Gp = G->pointer();
+
+    for (int P = 0; P < block->npoints(); P++) {
+        if (f[P] == 0.0) continue;
+        MassPoint mp = {x[P], y[P], z[P], w[P]};
+
+        // Stored weights are w_rad * w_partition; recover w_rad so the
+        // partition derivative can be rescaled to a full weight derivative.
+        double wpart = nuclear_weight_mgr_->computeNuclearWeight(mp, A, cutoff);
+        if (std::abs(wpart) < kDeadCellWeight) continue;
+        double pref = scale * f[P] * (w[P] / wpart);
+
+        nuclear_weight_mgr_->computeWeightGradient(mp, A, cutoff, wgrad.data());
+        for (int B = 0; B < natom; B++) {
+            Gp[B][0] += pref * wgrad[3 * B + 0];
+            Gp[B][1] += pref * wgrad[3 * B + 1];
+            Gp[B][2] += pref * wgrad[3 * B + 2];
+        }
     }
 }
 

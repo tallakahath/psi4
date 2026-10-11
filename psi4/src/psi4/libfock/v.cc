@@ -1957,11 +1957,41 @@ SharedMatrix RV::compute_gradient() {
         point_workers_[i]->set_deriv((functional_->is_gga() || functional_->is_meta() ? 2 : 1));
     }
 
+    // => Optional grid response <= //
+    // The grid-motion terms need each block on a single parent atom, so the
+    // gradient loop runs over an ATOMIC-blocked copy of the grid. The
+    // quadrature points and weights are identical; per-block basis screening
+    // can differ at the DFT_BASIS_TOLERANCE level.
+    const bool grid_response = options_.get_bool("DFT_GRID_RESPONSE");
+    std::shared_ptr<DFTGrid> ggrid;
+    std::vector<std::shared_ptr<PointFunctions>> grid_point_workers;
+    if (grid_response) {
+        if (functional_->is_meta()) {
+            throw PSIEXCEPTION("V: DFT_GRID_RESPONSE is not yet implemented for meta-GGA gradients.");
+        }
+        std::map<std::string, std::string> opt_map;
+        opt_map["DFT_BLOCK_SCHEME"] = "ATOMIC";
+        std::map<std::string, int> opt_int_map;
+        ggrid = std::make_shared<DFTGrid>(primary_->molecule(), primary_, opt_int_map, opt_map, options_);
+        max_functions = ggrid->max_functions();
+        max_points = ggrid->max_points();
+        for (size_t i = 0; i < num_threads_; i++) {
+            auto point_tmp = std::make_shared<RKSFunctions>(primary_, max_points, max_functions);
+            // The convection term needs grad(rho) even for LDA functionals
+            point_tmp->set_ansatz(std::max(ansatz, 1));
+            point_tmp->set_deriv((functional_->is_gga() ? 2 : 1));
+            point_tmp->set_pointers(D_AO_[0]);
+            grid_point_workers.push_back(point_tmp);
+        }
+    }
+    const auto& gblocks = (grid_response ? ggrid->blocks() : grid_->blocks());
+
     // Per thread temporaries
-    std::vector<SharedMatrix> G_local, U_local;
+    std::vector<SharedMatrix> G_local, U_local, GG_local;
     for (size_t i = 0; i < num_threads_; i++) {
         G_local.push_back(std::make_shared<Matrix>("G Temp", natom, 3));
         U_local.push_back(std::make_shared<Matrix>("U Temp", max_points, max_functions));
+        if (grid_response) GG_local.push_back(std::make_shared<Matrix>("Grad temp", 3, max_points));
     }
 
     std::vector<double> functionalq(num_threads_);
@@ -1972,16 +2002,16 @@ SharedMatrix RV::compute_gradient() {
 
     // => Master gradient loop <= //
 #pragma omp parallel for private(rank) schedule(dynamic) num_threads(num_threads_)
-    for (size_t Q = 0; Q < grid_->blocks().size(); Q++) {
+    for (size_t Q = 0; Q < gblocks.size(); Q++) {
         // ==> Per-thread setup <==
 #ifdef _OPENMP
         rank = omp_get_thread_num();
 #endif
         auto fworker = functional_workers_[rank];
-        auto pworker = point_workers_[rank];
+        auto pworker = (grid_response ? grid_point_workers[rank] : point_workers_[rank]);
 
         // ==> Per-block setup <==
-        auto block = grid_->blocks()[Q];
+        auto block = gblocks[Q];
 
         // ==> Compute rho, gamma, etc. for block <== //
         parallel_timer_on("Properties", rank);
@@ -2005,6 +2035,16 @@ SharedMatrix RV::compute_gradient() {
 
         // => Integrate all contributions into G <= //
         dft_integrators::rks_gradient_integrator(primary_, block, fworker, pworker, G_local[rank], U_local[rank]);
+
+        if (grid_response) {
+            // => Grid-motion contributions <= //
+            // Half-gradient convention, as rks_gradient_integrator.
+            dft_integrators::rks_grid_motion_integrator(block, fworker, pworker, G_local[rank], U_local[rank],
+                                                        GG_local[rank], 0.5);
+
+            // => Quadrature-weight derivatives <= //
+            ggrid->block_weight_gradient(block, fworker->value("V")->pointer(), 0.5, G_local[rank]);
+        }
 
         parallel_timer_off("V_xc gradient", rank);
     }
@@ -3706,6 +3746,9 @@ void UV::compute_Vx(std::vector<SharedMatrix> Dx, std::vector<SharedMatrix> ret)
 SharedMatrix UV::compute_gradient() {
     // => Validation <= //
     if ((D_AO_.size() != 2)) throw PSIEXCEPTION("V: UKS should have two D Matrices");
+    if (options_.get_bool("DFT_GRID_RESPONSE")) {
+        throw PSIEXCEPTION("V: DFT_GRID_RESPONSE is not yet implemented for UKS gradients.");
+    }
 
     // => Setup <= //
 
