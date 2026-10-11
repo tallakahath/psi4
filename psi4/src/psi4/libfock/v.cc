@@ -984,6 +984,10 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
     // => VV10 Grid and Cache <=
     std::map<std::string, std::string> opt_map;
     opt_map["DFT_PRUNING_SCHEME"] = "FLAT";
+    // ATOMIC blocking keeps every block's points on a single parent atom, which
+    // the grid-motion terms below require. The quadrature points and weights are
+    // identical to the energy path; only the grouping into blocks differs.
+    opt_map["DFT_BLOCK_SCHEME"] = "ATOMIC";
 
     std::map<std::string, int> opt_int_map;
     opt_int_map["DFT_RADIAL_POINTS"] = options_.get_int("DFT_VV10_RADIAL_POINTS");
@@ -1003,10 +1007,11 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
     const int natom = primary_->molecule()->natom();
 
     // Per thread temporaries
-    std::vector<SharedMatrix> G_local, U_local;
+    std::vector<SharedMatrix> G_local, U_local, GG_local;
     for (size_t i = 0; i < num_threads_; i++) {
         G_local.push_back(std::make_shared<Matrix>("G Temp", natom, 3));
         U_local.push_back(std::make_shared<Matrix>("U Temp", max_points, max_functions));
+        GG_local.push_back(std::make_shared<Matrix>("Grad temp", 3, max_points));
     }
 
 // => Compute the kernel <=
@@ -1040,10 +1045,36 @@ SharedMatrix VBase::vv10_nlc_gradient(SharedMatrix D) {
         }
         dft_integrators::rks_gradient_integrator(primary_, block, fworker, pworker, G_local[rank], U_local[rank]);
 
-        // Grid-motion terms (point positions, partition weights, and the
-        // kernel's GRID_W* response) are neglected here, as for the semilocal
-        // XC gradient. They are O(1) individually and must be added together
-        // or not at all.
+        // => Grid-motion contributions <= //
+        // Each quadrature point rides its parent nucleus (hence ATOMIC blocking),
+        // so dE/dR_A picks up dE/dr_i for every point centered on atom A. All
+        // terms use the half-gradient convention of rks_gradient_integrator.
+        // Two approximations remain: the grid orientation is held frozen
+        // (OrientationMgr rotates atomic grids with the geometry), and the
+        // left/right VV10 screening thresholds differ (1e-12 in
+        // compute_vv10_kernel vs DFT_VV10_RHO_CUTOFF), so the pair forces are
+        // only antisymmetric for points above both cutoffs.
+        const size_t Aparent = block->parent_atom();
+        double** Gp = G_local[rank]->pointer();
+
+        // Explicit kernel dependence on the grid point positions
+        const double* grid_wx = fworker->vv_value("GRID_WX")->pointer();
+        const double* grid_wy = fworker->vv_value("GRID_WY")->pointer();
+        const double* grid_wz = fworker->vv_value("GRID_WZ")->pointer();
+        for (int P = 0; P < npoints; P++) {
+            Gp[Aparent][0] += 0.5 * grid_wx[P];
+            Gp[Aparent][1] += 0.5 * grid_wy[P];
+            Gp[Aparent][2] += 0.5 * grid_wz[P];
+        }
+
+        // Density variation at the moving point
+        dft_integrators::rks_grid_motion_integrator(block, fworker, pworker, G_local[rank], U_local[rank],
+                                                    GG_local[rank], 0.5);
+
+        // Quadrature-weight derivatives. The position terms above and this one
+        // are each O(1); only their sum is a small quadrature artifact.
+        const double* eps_grid = fworker->vv_value("GRID_EPS")->pointer();
+        nlgrid.block_weight_gradient(block, eps_grid, 0.5, G_local[rank]);
 
         parallel_timer_off("V_xc gradient", rank);
     }
