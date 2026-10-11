@@ -383,8 +383,10 @@ inline void rks_gradient_integrator(std::shared_ptr<BasisSet> primary, std::shar
 // parent nucleus: each point moves with the nucleus, so dE/dR_A picks up
 //   scale * w_P * (v_rho grad(rho) + v_gamma grad(gamma))
 // with grad(gamma)_a = 2 sum_b rho_ab rho_b and the density Hessian
-//   rho_ab = 4 * (phi_ab D phi + phi_a D phi_b).
-// Requires an ATOMIC-blocked grid and second basis derivatives for GGA. The
+//   rho_ab = 4 * (phi_ab D phi + phi_a D phi_b),
+// plus v_tau grad(tau) for meta-GGAs, grad(tau)_a = 2 sum_b phi_ab D phi_b in
+// the stored TAU_A convention (V_TAU_A holds 0.5 dF/dtau, see LibXCfunctional).
+// Requires an ATOMIC-blocked grid and second basis derivatives beyond LDA. The
 // quadrature-weight response is separate (MolecularGrid::block_weight_gradient).
 inline void rks_grid_motion_integrator(std::shared_ptr<BlockOPoints> block, std::shared_ptr<SuperFunctional> fworker,
                                        std::shared_ptr<PointFunctions> pworker, SharedMatrix G, SharedMatrix U,
@@ -408,7 +410,7 @@ inline void rks_grid_motion_integrator(std::shared_ptr<BlockOPoints> block, std:
     const double* v_rho = fworker->value("V_RHO_A")->pointer();
 
     GG->zero();
-    if (fworker->is_gga()) {
+    if (fworker->is_gga() || fworker->is_meta()) {
         double** phi_d1[3] = {pworker->basis_value("PHI_X")->pointer(), pworker->basis_value("PHI_Y")->pointer(),
                               pworker->basis_value("PHI_Z")->pointer()};
         double** phi_xx = pworker->basis_value("PHI_XX")->pointer();
@@ -418,7 +420,8 @@ inline void rks_grid_motion_integrator(std::shared_ptr<BlockOPoints> block, std:
         double** phi_yz = pworker->basis_value("PHI_YZ")->pointer();
         double** phi_zz = pworker->basis_value("PHI_ZZ")->pointer();
         double** phi_d2[3][3] = {{phi_xx, phi_xy, phi_xz}, {phi_xy, phi_yy, phi_yz}, {phi_xz, phi_yz, phi_zz}};
-        const double* v_gamma = fworker->value("V_GAMMA_AA")->pointer();
+        const double* v_gamma = (fworker->is_gga() ? fworker->value("V_GAMMA_AA")->pointer() : nullptr);
+        const double* v_tau = (fworker->is_meta() ? fworker->value("V_TAU_A")->pointer() : nullptr);
 
         // Density Hessian (half-convention) from U := phi D and T := phi_b D.
         C_DGEMM('N', 'N', npoints, nlocal, nlocal, 1.0, phi[0], coll_funcs, Dp[0], max_functions, 0.0, Up[0],
@@ -428,9 +431,14 @@ inline void rks_grid_motion_integrator(std::shared_ptr<BlockOPoints> block, std:
                     Tp[0], max_functions);
             for (int P = 0; P < npoints; P++) {
                 for (int a = 0; a < 3; a++) {
-                    const double rho_ab = 4.0 * (C_DDOT(nlocal, phi_d2[a][b][P], 1, Up[P], 1) +
-                                                 C_DDOT(nlocal, phi_d1[a][P], 1, Tp[P], 1));
-                    GGp[a][P] += 2.0 * v_gamma[P] * rho_ab * rho_d1[b][P];
+                    if (v_gamma) {
+                        const double rho_ab = 4.0 * (C_DDOT(nlocal, phi_d2[a][b][P], 1, Up[P], 1) +
+                                                     C_DDOT(nlocal, phi_d1[a][P], 1, Tp[P], 1));
+                        GGp[a][P] += 2.0 * v_gamma[P] * rho_ab * rho_d1[b][P];
+                    }
+                    if (v_tau) {
+                        GGp[a][P] += 4.0 * v_tau[P] * C_DDOT(nlocal, phi_d2[a][b][P], 1, Tp[P], 1);
+                    }
                 }
             }
         }

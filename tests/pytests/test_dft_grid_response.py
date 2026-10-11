@@ -14,6 +14,13 @@ _HCN = """
     H    0.1476295    1.3052847    0.0000000
 """
 
+_NH2 = """
+    0 2
+    N
+    H 1 1.03
+    H 1 1.03 2 103.0
+"""
+
 
 @pytest.mark.findif
 @pytest.mark.parametrize("func,ref_key,geom,scheme", [
@@ -21,6 +28,8 @@ _HCN = """
     pytest.param("SVWN", "rks", _HCN, "STRATMANN", id="SVWN RKS Stratmann"),
     pytest.param("SVWN", "rks", _HCN, "SBECKE", id="SVWN RKS smooth Becke"),
     pytest.param("BLYP", "rks", _HCN, "TREUTLER", id="BLYP RKS"),
+    pytest.param("TPSS", "rks", _HCN, "TREUTLER", id="TPSS RKS"),
+    pytest.param("TPSS", "uks", _NH2, "TREUTLER", id="TPSS UKS doublet"),
 ])
 def test_dft_grid_response_gradient(func, ref_key, geom, scheme):
     # Deliberately coarse grid so the neglected grid response is visible; with
